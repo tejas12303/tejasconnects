@@ -160,7 +160,8 @@
     .primary:active, .secondary:active, .direction:active { transform: scale(0.97); }
     button:focus-visible { outline: 3px solid var(--violet); outline-offset: 3px; }
 
-    .score-row { margin-top: 18px; }
+    .score-row { flex-wrap: wrap; margin-top: 18px; }
+    .score-group { display: flex; align-items: center; gap: 22px; }
     .score-label {
       color: var(--muted);
       font-size: 0.72rem;
@@ -169,7 +170,8 @@
       text-transform: uppercase;
     }
     .score-value { margin-left: 8px; font-size: 1.12rem; font-weight: 800; }
-    .button-row { justify-content: flex-end; }
+    .button-row { flex: 1; justify-content: flex-end; }
+    .secondary:disabled { color: #727d98; cursor: not-allowed; filter: none; }
 
     .side-card { display: flex; flex-direction: column; padding: 24px; }
     .side-heading { justify-content: flex-start; margin-bottom: 25px; }
@@ -261,7 +263,7 @@
       .best-card { align-self: center; }
       .instructions { grid-column: 1 / -1; margin-top: 0; }
       .instructions h3 { margin-bottom: 9px; }
-      .key-list { grid-template-columns: 1fr 1fr; }
+      .key-list { grid-template-columns: 1fr; }
       .tip { grid-column: 1 / -1; margin-top: 0; }
       .touch-controls { display: grid; }
       .status { font-size: 0.7rem; }
@@ -302,8 +304,12 @@
       </div>
 
       <div class="score-row">
-        <div><span class="score-label">Score</span><span class="score-value" id="score">0</span></div>
+        <div class="score-group">
+          <div><span class="score-label">Score</span><span class="score-value" id="score">0</span></div>
+          <div><span class="score-label">Bonus orb</span><span class="score-value" id="bonus-status">Every 4</span></div>
+        </div>
         <div class="button-row">
+          <button class="secondary" id="dash-button" type="button" aria-label="Dash, ready" disabled>Dash · ready</button>
           <button class="secondary" id="pause-button" type="button" aria-pressed="false">Pause</button>
         </div>
       </div>
@@ -325,14 +331,15 @@
         <ul class="key-list">
           <li><span>Move</span><span class="key-group"><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></span></li>
           <li><span>Alternate</span><span class="key-group"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span></li>
+          <li><span>Dash</span><kbd>SHIFT</kbd></li>
           <li><span>Pause / resume</span><kbd>SPACE</kbd></li>
           <li><span>Start / restart</span><kbd>ENTER</kbd></li>
         </ul>
       </section>
 
       <div class="tip">
-        <h3>Quick tip</h3>
-        <p>Plan your turns early. The snake gets a little faster every few orbs!</p>
+        <h3>Advanced tricks</h3>
+        <p>Dash with Shift to burst forward. Bonus orbs are worth 3 points, but vanish after 7 seconds.</p>
       </div>
     </aside>
   </main>
@@ -347,14 +354,21 @@
       const startButton = document.querySelector("#start-button");
       const scoreElement = document.querySelector("#score");
       const bestElement = document.querySelector("#best-score");
+      const bonusStatusElement = document.querySelector("#bonus-status");
       const statusElement = document.querySelector("#status");
       const pauseButton = document.querySelector("#pause-button");
+      const dashButton = document.querySelector("#dash-button");
 
       const cells = 20;
       const cellSize = canvas.width / cells;
       const initialSpeed = 145;
+      const dashDuration = 900;
+      const dashCooldown = 5000;
+      const bonusDuration = 7000;
+      const bonusInterval = 4;
       let snake;
       let food;
+      let bonusOrb;
       let direction;
       let queuedDirection;
       let score = 0;
@@ -362,6 +376,11 @@
       let state = "ready";
       let lastFrame = 0;
       let elapsed = 0;
+      let dashRemaining = 0;
+      let dashCooldownRemaining = 0;
+      let bonusRemaining = 0;
+      let lastDashLabel = "";
+      let lastBonusLabel = "";
 
       try {
         best = Number(localStorage.getItem("neon-snake-best")) || 0;
@@ -378,18 +397,50 @@
           : nextState === "over" ? "Game over" : "Ready";
         pauseButton.textContent = nextState === "paused" ? "Resume" : "Pause";
         pauseButton.setAttribute("aria-pressed", String(nextState === "paused"));
+        updateDashButton();
       }
 
-      function placeFood() {
+      function randomEmptyCell() {
         const emptyCells = [];
         for (let y = 0; y < cells; y += 1) {
           for (let x = 0; x < cells; x += 1) {
-            if (!snake.some((segment) => segment.x === x && segment.y === y)) {
+            const occupiedBySnake = snake.some((segment) => segment.x === x && segment.y === y);
+            const occupiedByFood = food && food.x === x && food.y === y;
+            const occupiedByBonus = bonusOrb && bonusOrb.x === x && bonusOrb.y === y;
+            if (!occupiedBySnake && !occupiedByFood && !occupiedByBonus) {
               emptyCells.push({ x, y });
             }
           }
         }
-        food = emptyCells.length ? emptyCells[Math.floor(Math.random() * emptyCells.length)] : null;
+        return emptyCells.length ? emptyCells[Math.floor(Math.random() * emptyCells.length)] : null;
+      }
+
+      function placeFood() {
+        food = randomEmptyCell();
+      }
+
+      function updateDashButton() {
+        const label = dashRemaining > 0
+          ? `Dash · ${Math.ceil(dashRemaining / 100) / 10}s`
+          : dashCooldownRemaining > 0
+            ? `Dash · ${Math.ceil(dashCooldownRemaining / 1000)}s`
+            : "Dash · ready";
+        if (label !== lastDashLabel) {
+          dashButton.textContent = label;
+          dashButton.setAttribute("aria-label", `${label.replace(" · ", ", ")}`);
+          lastDashLabel = label;
+        }
+        dashButton.disabled = state !== "playing" || dashCooldownRemaining > 0;
+      }
+
+      function updateBonusStatus() {
+        const label = bonusOrb
+          ? `${Math.ceil(bonusRemaining / 1000)}s left`
+          : `Every ${bonusInterval}`;
+        if (label !== lastBonusLabel) {
+          bonusStatusElement.textContent = label;
+          lastBonusLabel = label;
+        }
       }
 
       function resetGame() {
@@ -402,8 +453,16 @@
         queuedDirection = direction;
         score = 0;
         elapsed = 0;
+        dashRemaining = 0;
+        dashCooldownRemaining = 0;
+        bonusOrb = null;
+        bonusRemaining = 0;
+        lastDashLabel = "";
+        lastBonusLabel = "";
         scoreElement.textContent = "0";
         placeFood();
+        updateBonusStatus();
+        updateDashButton();
       }
 
       function startGame() {
@@ -442,10 +501,32 @@
         queuedDirection = next;
       }
 
+      function activateDash() {
+        if (state !== "playing" || dashCooldownRemaining > 0) return;
+        dashRemaining = dashDuration;
+        dashCooldownRemaining = dashCooldown;
+        updateDashButton();
+      }
+
+      function awardPoints(points) {
+        score += points;
+        scoreElement.textContent = String(score);
+        if (score > best) {
+          best = score;
+          bestElement.textContent = String(best);
+          try {
+            localStorage.setItem("neon-snake-best", String(best));
+          } catch (error) {
+            console.warn("Could not save the high score.", error);
+          }
+        }
+      }
+
       function tick() {
         direction = queuedDirection;
         const head = { x: snake[0].x + direction.x, y: snake[0].y + direction.y };
-        const eating = food && head.x === food.x && head.y === food.y;
+        const eating = Boolean(food && head.x === food.x && head.y === food.y);
+        const eatingBonus = Boolean(bonusOrb && head.x === bonusOrb.x && head.y === bonusOrb.y);
         const bodyToCheck = eating ? snake : snake.slice(0, -1);
         const hitWall = head.x < 0 || head.x >= cells || head.y < 0 || head.y >= cells;
         const hitSelf = bodyToCheck.some((segment) => segment.x === head.x && segment.y === head.y);
@@ -457,18 +538,18 @@
 
         snake.unshift(head);
         if (eating) {
-          score += 1;
-          scoreElement.textContent = String(score);
-          if (score > best) {
-            best = score;
-            bestElement.textContent = String(best);
-            try {
-              localStorage.setItem("neon-snake-best", String(best));
-            } catch (error) {
-              console.warn("Could not save the high score.", error);
-            }
-          }
+          awardPoints(1);
           placeFood();
+          if (score % bonusInterval === 0 && !bonusOrb) {
+            bonusOrb = randomEmptyCell();
+            bonusRemaining = bonusOrb ? bonusDuration : 0;
+            lastBonusLabel = "";
+          }
+        } else if (eatingBonus) {
+          awardPoints(3);
+          bonusOrb = null;
+          bonusRemaining = 0;
+          lastBonusLabel = "";
         } else {
           snake.pop();
         }
@@ -505,15 +586,28 @@
           context.shadowBlur = 0;
         }
 
+        if (bonusOrb) {
+          const centerX = (bonusOrb.x + 0.5) * cellSize;
+          const centerY = (bonusOrb.y + 0.5) * cellSize;
+          context.save();
+          context.translate(centerX, centerY);
+          context.rotate(Math.PI / 4);
+          context.shadowColor = "#ffd166";
+          context.shadowBlur = 22;
+          context.fillStyle = "#ffd166";
+          context.fillRect(-cellSize * 0.23, -cellSize * 0.23, cellSize * 0.46, cellSize * 0.46);
+          context.restore();
+        }
+
         if (snake) {
           snake.forEach((segment, index) => {
             const inset = 2;
             const x = segment.x * cellSize + inset;
             const y = segment.y * cellSize + inset;
             const size = cellSize - inset * 2;
-            context.fillStyle = index === 0 ? "#a4ffd8" : `rgba(103, 245, 189, ${Math.max(0.48, 0.9 - index * 0.012)})`;
-            context.shadowColor = index === 0 ? "#67f5bd" : "transparent";
-            context.shadowBlur = index === 0 ? 17 : 0;
+            context.fillStyle = index === 0 ? (dashRemaining > 0 ? "#d7c8ff" : "#a4ffd8") : `rgba(103, 245, 189, ${Math.max(0.48, 0.9 - index * 0.012)})`;
+            context.shadowColor = index === 0 ? (dashRemaining > 0 ? "#a78bfa" : "#67f5bd") : "transparent";
+            context.shadowBlur = index === 0 ? (dashRemaining > 0 ? 24 : 17) : 0;
             context.beginPath();
             context.roundRect(x, y, size, size, 6);
             context.fill();
@@ -526,10 +620,20 @@
         const delta = Math.min(timestamp - lastFrame, 100);
         lastFrame = timestamp;
         if (state === "playing") {
+          dashRemaining = Math.max(0, dashRemaining - delta);
+          dashCooldownRemaining = Math.max(0, dashCooldownRemaining - delta);
+          bonusRemaining = Math.max(0, bonusRemaining - delta);
+          if (bonusOrb && bonusRemaining === 0) {
+            bonusOrb = null;
+            lastBonusLabel = "";
+          }
+          updateDashButton();
+          updateBonusStatus();
           elapsed += delta;
           const speed = Math.max(72, initialSpeed - Math.floor(score / 4) * 9);
-          if (elapsed >= speed) {
-            elapsed %= speed;
+          const activeSpeed = dashRemaining > 0 ? speed / 2 : speed;
+          if (elapsed >= activeSpeed) {
+            elapsed %= activeSpeed;
             tick();
           }
         }
@@ -546,7 +650,10 @@
 
       window.addEventListener("keydown", (event) => {
         const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-        if (directions[key]) {
+        if (key === "Shift") {
+          event.preventDefault();
+          activateDash();
+        } else if (directions[key]) {
           event.preventDefault();
           changeDirection(directions[key]);
         } else if (key === " " || key === "Spacebar") {
@@ -567,6 +674,8 @@
       pauseButton.addEventListener("click", () => {
         if (state === "playing" || state === "paused") togglePause();
       });
+
+      dashButton.addEventListener("click", activateDash);
 
       document.querySelectorAll(".direction").forEach((button) => {
         button.addEventListener("click", () => {
